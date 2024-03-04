@@ -1,0 +1,14 @@
+jupyterlab
+gdown
+qdrant_client
+fastembed
+sentence-transformers
+llama-index==0.10.1
+llama-index-embeddings-fastembed
+llama-index-vector-stores-qdrant
+python-dotenv
+reflex
+spacy
+matplotlib
+fashion-clip
+# reclist
