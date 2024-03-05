@@ -162,3 +162,10 @@ cython_debug/
 experiments/data_for_fashion_clip/
 experiments/data.zip
 data/
+app/assets/data_for_fashion_clip/
+
+# add all the .DS_Store files
+**/.DS_Store
+
+# add the data.zip file
+data.zip
