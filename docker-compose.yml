@@ -8,3 +8,15 @@ services:
       - "6334:6334"
     volumes:
       - ./data:/qdrant/storage
+  stilsucher:
+    image: stilsucher
+    command: ["start_reflex.sh"]
+    environment:
+      - QDRANT_URL="http://qdrant"
+    ports:
+      - "3000:3000"
+      - "8000:8000"
+    volumes:
+      - ./app:/app
+    stdin_open: true
+    tty: true
