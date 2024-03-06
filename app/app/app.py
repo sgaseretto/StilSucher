@@ -13,17 +13,15 @@ import numpy as np
 import os
 
 # Initialize the Qdrant client
-qdrant_url_varname = "QDRANT_URL"
-qdrant_url = os.environ.get(qdrant_url_varname)
-qdrant_url = qdrant_url or "localhost"
-# client = QdrantClient(path="../experiments/qdata")
-# client = AsyncQdrantClient(path="../experiments/qdata")
-# client = AsyncQdrantClient("http://localhost:6333")
+qdrant_url = os.environ.get("QDRANT_URL", "localhost")
+print(qdrant_url)
+
 client = AsyncQdrantClient(
     url=qdrant_url,
     port=6333,
     prefer_grpc=True,
 )
+
 collection_name = "fclip"
 
 from fashion_clip.fashion_clip import FashionCLIP
@@ -1061,8 +1059,10 @@ def home_content():
     return rx.flex(
         rx.image(src="/StilSucher.png", width="30%"),
         rx.heading("Stilsucher", size="9"),
-        rx.text("Stilsucher is a fashion search engine that uses the Fashion-CLIP to do Text2Image search and retrieval."),
-        rx.text("You can use it to search for similar items, discover items by adding more context, and get recommendations based on positive and negative text."),
+        rx.text("Stilsucher is a fashion search engine that utilizes advanced AI algorithms to revolutionize the way you search for fashion items."),
+        rx.text("With Stilsucher, you can easily find similar items by describing the clothes you are looking for. Stilsucher enables Text2Image search and retrieval, providing accurate and relevant results."),
+        rx.text("Not only that, but Stilsucher allows you to discover new items by adding more context to your search. By specifying what you want to include and what to avoid, you can fine-tune your search and explore a wider range of fashion options."),
+        rx.text("Additionally, Stilsucher offers the posibility to retrieve clothes without the restriction of using positive and negative pairs, you can provide as many positive and negative text samples, and based on that Stilsucher will retrieve clothes that match your unique style and preferences."),
         direction="column",
         spacing="3",
         align="center",

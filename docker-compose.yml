@@ -12,7 +12,7 @@ services:
     image: stilsucher
     command: ["start_reflex.sh"]
     environment:
-      - QDRANT_URL="http://qdrant"
+      - QDRANT_URL=http://qdrant
     ports:
       - "3000:3000"
       - "8000:8000"
