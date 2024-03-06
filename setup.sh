@@ -24,12 +24,13 @@ fi
 # check if there already is a folder called data_for_fashion_clip in the experiments folder
 if [ ! -d "experiments/data_for_fashion_clip" ]; then
     echo "Creating data_for_fashion_clip folder in experiments"
-    mv data_for_fashion_clip experiments/
-    echo "data_for_fashion_clip moved to experiments"
+    cp -r data_for_fashion_clip experiments/
+    echo "data_for_fashion_clip copied to experiments"
 fi
 
 if [ ! -d "app/assets/data_for_fashion_clip" ]; then
-    echo "Moving data_for_fashion_clip folder in app/assets"
-    mv data_for_fashion_clip app/assets/
-    echo "data_for_fashion_clip moved to app/assets"
+    echo "Copying data_for_fashion_clip folder in app/assets"
+    cp -r data_for_fashion_clip app/assets/
+    echo "data_for_fashion_clip copied to app/assets"
 fi
+rm -rf data_for_fashion_clip
