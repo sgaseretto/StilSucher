@@ -54,6 +54,10 @@ Stilsucher allows the user to search images in multiple ways using different ret
 - Username: admin
 - Password: admin
 
+The application is divided into the following sections:
+- The Reflex Application: [http://localhost:3000](http://localhost:3000)
+- The FastAPI Application: [http://localhost:8000](http://localhost:8000/docs)
+
 ### **Simple Text2Image search**: 
 
 <!-- 01-simple-search.gif -->
