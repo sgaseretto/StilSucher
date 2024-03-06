@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y \
 
 # Install app requirements and reflex inside virtualenv
 COPY requirements.txt .
-COPY .env .
+# COPY .env .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the start_reflex.sh script to /usr/local/bin so it's in the PATH
