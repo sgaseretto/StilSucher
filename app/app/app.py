@@ -10,15 +10,26 @@ from typing import List, Optional
 from qdrant_client import QdrantClient, AsyncQdrantClient
 from qdrant_client.http import models
 import numpy as np
+import os
 
 # Initialize the Qdrant client
+qdrant_url_varname = "QDRANT_URL"
+qdrant_url = os.environ.get(qdrant_url_varname)
+qdrant_url = qdrant_url or "localhost"
 # client = QdrantClient(path="../experiments/qdata")
 # client = AsyncQdrantClient(path="../experiments/qdata")
-client = AsyncQdrantClient("http://localhost:6333")
+# client = AsyncQdrantClient("http://localhost:6333")
+client = AsyncQdrantClient(
+    url=qdrant_url,
+    port=6333,
+    prefer_grpc=True,
+)
 collection_name = "fclip"
 
 from fashion_clip.fashion_clip import FashionCLIP
 fclip = FashionCLIP('fashion-clip')
+
+MAX_FEEDBACKS = 10
 
 # -------------------------------------------------- Models ----------------------------------------------- #
 
@@ -34,9 +45,8 @@ class UserFeedback(rx.Model, table=True):
     timestamp: datetime = Field(default_factory=datetime.utcnow)
     retrieval_method: str
     interacted_item_id: int
-    feedback: str
+    is_positive_feedback: bool
     query: str  # Storing the query as a JSON string
-    results: str  # Storing result IDs as a JSON string
     user_reference: Optional[str]
     
     def __init__(self, **data):
@@ -155,52 +165,92 @@ class State(rx.State):
     discovery_positive_sample: str = ""
     discovery_negative_sample: str = ""
     discovery_context: List[dict] = []
-    discover_results: List[dict] = []
+    # discover_results: List[dict] = []
 
-    show_columns = ["User", 'Item ID', "Feedback", "Retrieval Method", "Query",]
-    sidebar_open: bool = False
+    data_columns = ["User", 'Item ID', "Was Positive Feedback?", "Retrieval Method", "Query",]
     active_page: str = "Home"
     
+    @rx.var
+    def feedbacks(self) -> List[UserFeedback]:
+        with rx.session() as session:
+            if self.logged_in:
+                if self.username == "admin":
+                    users_feedback = session.exec(
+                        select(UserFeedback)
+                        .order_by(UserFeedback.timestamp.desc())
+                        .limit(MAX_FEEDBACKS)
+                    ).all()
+                elif self.username != "":
+                    users_feedback = session.exec(
+                        select(UserFeedback)
+                        .where(UserFeedback.user_reference == self.username)
+                        .order_by(UserFeedback.timestamp.desc())
+                        .limit(MAX_FEEDBACKS)
+                    ).all()
+                return [
+                        [
+                            feedback.user_reference, 
+                            feedback.interacted_item_id, 
+                            str(feedback.is_positive_feedback), 
+                            feedback.retrieval_method, 
+                            feedback.query
+                        ] 
+                    for feedback in users_feedback
+                    ]
+            else:
+                return []
 
     def login(self):
-            """
-            Logs in the user by checking the provided username and password.
-            If the username and password are valid, sets the 'logged_in' attribute to True and redirects to the home page.
-            If the username or password is invalid, displays an alert message.
-            """
-            with rx.session() as session:
-                user = session.exec(
-                    select(User).where(User.username == self.username)
-                ).first()
-                if (user and user.password == self.password) or self.username == "admin":
-                    self.logged_in = True
-                    return rx.redirect("/home")
-                else:
-                    return rx.window_alert("Invalid username or password.")
+        """
+        Logs in the user by checking the provided username and password.
+        If the username and password are valid, sets the 'logged_in' attribute to True and redirects to the home page.
+        If the username or password is invalid, displays an alert message.
+        """
+        with rx.session() as session:
+            user = session.exec(
+                select(User).where(User.username == self.username)
+            ).first()
+            if (user and user.password == self.password) or self.username == "admin":
+                self.logged_in = True
+                return rx.redirect("/home")
+            else:
+                return rx.window_alert("Invalid username or password.")
 
     def logout(self):
         self.reset()
         return rx.redirect("/")
 
     def signup(self):
-            """
-            Sign up a new user.
+        """
+        Sign up a new user.
 
-            This method creates a new user with the provided username and password,
-            and adds it to the database. After successful signup, the user is logged in
-            and redirected to the home page.
+        This method creates a new user with the provided username and password,
+        and adds it to the database. After successful signup, the user is logged in
+        and redirected to the home page.
 
-            Returns:
-                A redirect response to the home page.
-            """
-            with rx.session() as session:
-                user = User(username=self.username, password=self.password)
-                session.add(user)
-                session.commit()
-            self.logged_in = True
-            return rx.redirect("/home")
+        Returns:
+            A redirect response to the home page.
+        """
+        with rx.session() as session:
+            user = User(username=self.username, password=self.password)
+            session.add(user)
+            session.commit()
+        self.logged_in = True
+        return rx.redirect("/home")
     
     def get_results_list_of_dicts(self, results):
+        """
+        Converts a list of results into a list of dictionaries.
+
+        Args:
+            results (list): A list of results.
+
+        Returns:
+            list: A list of dictionaries, where each dictionary represents a result with the following keys:
+                - 'id': The ID of the result.
+                - 'prod_name': The product name of the result.
+                - 'prod_desc': The product description of the result.
+        """
         results_list_of_dicts = []
         for result in results:
             results_list_of_dicts.append({
@@ -212,6 +262,15 @@ class State(rx.State):
 
     # Search Functions for the App 
     async def search(self, limit: int = 12):
+        """
+        Perform a search based on the provided search query.
+
+        Args:
+            limit (int): The maximum number of search results to retrieve. Default is 12.
+
+        Returns:
+            None
+        """
         # we construct the query for search
         print(f"Searching for {self.search_query}...")
         query_vector = fclip.encode_text([self.search_query], batch_size=1)[0].tolist()
@@ -229,6 +288,16 @@ class State(rx.State):
 
     # Discovery Functions for the App
     def add_discovery_context(self):
+        """
+        Adds a discovery context to the list of discovery contexts.
+
+        If both the positive and negative samples are provided, a new discovery context
+        is created and appended to the list. The positive and negative samples are then
+        cleared. If either the positive or negative sample is missing, an alert is shown.
+
+        Returns:
+            None
+        """
         if self.discovery_positive_sample !="" and self.discovery_negative_sample !="":
             self.discovery_context.append(
                 {
@@ -246,6 +315,15 @@ class State(rx.State):
     #     return len(self.discovery_context) > 0
 
     async def discover(self, limit: int = 12):
+        """
+        Discover similar items based on the search query and discovery context.
+
+        Args:
+            limit (int): The maximum number of results to return. Default is 12.
+
+        Returns:
+            None
+        """
         # print("Discovery Target:", self.discovery_target)
         print("Discovery Target:", self.search_query)
         # print("Discovering...", self.loading_search_response)
@@ -269,16 +347,20 @@ class State(rx.State):
         # self.discover_results = self.get_results_list_of_dicts(results)
         self.search_results = self.get_results_list_of_dicts(results)
         print("Done Discovering!")
-        # yield rx.console_log("Got result")
 
-    # async def consume_and_update(self, async_gen):
-    #     async for _ in async_gen:
-    #         pass
 
     async def search_and_discover(self):
-        # if self.dicovery_context is not an empty list do discovery, else search
+        """
+        Performs a search or discovery based on the search query and discovery context.
+
+        If the search query is empty, it displays an alert message.
+        If the discovery context is not empty, it performs a discovery.
+        Otherwise, it performs a search.
+
+        Returns:
+            None
+        """
         if self.search_query == "":
-            # return rx.window_alert("Please enter a search query.")
             yield rx.window_alert("Please enter a search query.")
         else:
             if len(self.discovery_context) > 0:
@@ -295,26 +377,46 @@ class State(rx.State):
                 yield
 
     async def find_pair_index_in_discovery_context(self, pair):
+        """
+        Finds the index of a pair in the discovery context.
+
+        Args:
+            pair (dict): The pair to search for in the discovery context.
+
+        Returns:
+            int: The index of the pair in the discovery context, or -1 if not found.
+        """
         for index, sample_pair in enumerate(self.discovery_context):
             if pair['positive'] == sample_pair['positive'] and pair['negative'] == sample_pair['negative']:
                 return index
         return -1
 
     async def remove_from_discovery_context(self, pair):
+        """
+        Removes a pair from the discovery context.
+
+        Args:
+            pair: The pair to be removed.
+
+        Returns:
+            None
+        """
         index = await self.find_pair_index_in_discovery_context(pair)
         self.discovery_context.pop(index)
 
     # Recommendation Functions for the App
-    # async def recommend_retrieval(self):
-    #     print("Positive Samples:", self.recommend_positive_samples)
-    #     self.loading_recommend_response = True
-    #     yield
-    #     print("Negative Samples:", self.recommend_negative_samples)
-    #     print("Strategy:", self.use_best_score_strategy)
-    #     self.loading_recommend_response = False
-    #     yield
 
     async def get_recommend_results(self, limit: int = 12):
+        """
+        Retrieves recommendation results based on positive and negative samples.
+
+        Args:
+            limit (int): The maximum number of recommendation results to retrieve. Defaults to 12.
+
+        Returns:
+            None: If no positive or negative samples are provided.
+            List[Dict[str, Any]]: A list of recommendation results in the form of dictionaries.
+        """
         positive_vectors = None
         negative_vectors = None
         if self.recommend_positive_samples != [] or self.recommend_negative_samples != []:
@@ -335,6 +437,15 @@ class State(rx.State):
             return rx.window_alert("Please provide at least one positive sample.")
         
     async def change_strategy(self, use_best_score_strategy):
+        """
+        Change the strategy for recommendation based on the given parameter.
+
+        Args:
+            use_best_score_strategy (bool): Flag indicating whether to use the best score strategy or the average score strategy.
+
+        Returns:
+            None
+        """
         self.use_best_score_strategy = use_best_score_strategy
         if self.recommend_positive_samples != [] or self.recommend_negative_samples != []:
             print("Positive Samples:", self.recommend_positive_samples)
@@ -355,6 +466,15 @@ class State(rx.State):
                 yield
 
     async def add_to_positive_sample_recommend(self):
+        """
+        Adds the current recommend query to the list of positive samples,
+        retrieves new recommend results, and updates the loading status.
+
+        If the current recommend query is empty, it displays an alert.
+
+        Yields:
+            None
+        """
         if self.current_recommend_query != "":
             self.recommend_positive_samples.append(self.current_recommend_query)
             self.current_recommend_query = ""
@@ -369,6 +489,15 @@ class State(rx.State):
             yield rx.window_alert("Please enter a sample.")
     
     async def add_to_negative_sample_recommend(self):
+        """
+        Adds the current recommend query to the list of negative samples,
+        retrieves new recommend results, and updates the loading status.
+
+        If the current recommend query is empty, it displays an alert message.
+
+        Yields:
+            None
+        """
         if self.current_recommend_query != "":
             self.recommend_negative_samples.append(self.current_recommend_query)
             self.current_recommend_query = ""
@@ -383,6 +512,16 @@ class State(rx.State):
             yield rx.window_alert("Please enter a sample.")
 
     async def remove_from_recommend_positive_samples(self, sample_text):
+        """
+        Removes the given sample_text from the recommend_positive_samples list,
+        reloads the recommend results, and updates the loading_recommend_response flag.
+
+        Args:
+            sample_text (str): The sample text to be removed.
+
+        Yields:
+            None
+        """
         self.recommend_positive_samples.remove(sample_text)
         self.loading_recommend_response = True
         yield
@@ -391,6 +530,16 @@ class State(rx.State):
         yield
 
     async def remove_from_recommend_negative_samples(self, sample_text):
+        """
+        Removes the specified sample_text from the recommend_negative_samples list,
+        triggers the get_recommend_results method, and updates the loading_recommend_response flag.
+
+        Args:
+            sample_text (str): The text to be removed from the recommend_negative_samples list.
+
+        Yields:
+            None
+        """
         self.recommend_negative_samples.remove(sample_text)
         self.loading_recommend_response = True
         yield
@@ -399,25 +548,64 @@ class State(rx.State):
         yield
 
 
+    async def save_user_feedback_to_db(self, user_feedback: UserFeedback):
+        """
+        Saves the user feedback to the database.
 
-    async def save_user_feedback_to_db(self):
+        Args:
+            user_feedback (UserFeedback): The user feedback object to be saved.
 
-        print("Saving User Feedback to DB")
+        Returns:
+            None
+        """
+        with rx.session() as session:
+            if (
+                session.exec(
+                    select(UserFeedback)
+                    .where(UserFeedback.user_reference == user_feedback.user_reference)
+                    .where(UserFeedback.interacted_item_id == user_feedback.interacted_item_id)
+                    .where(UserFeedback.query == user_feedback.query)
+                    .where(UserFeedback.retrieval_method == user_feedback.retrieval_method)
+                    .where(UserFeedback.is_positive_feedback == user_feedback.is_positive_feedback)
+                ).first() 
+            ):
+                print("User Feedback already exists in DB")
+            else:
+                print(user_feedback.interacted_item_id, user_feedback.query, user_feedback.retrieval_method, user_feedback.is_positive_feedback)
+                session.add(user_feedback)
+                session.commit()
+                print("User Feedback Saved to DB")
 
-    async def get_user_feedback(self, retrieval_method):
-        if retrieval_method == "Search":
+
+    async def receive_user_feedback(self, retrieval_method_page, interacted_item_id, is_positive_feedback):
+        """
+        Receives user feedback and saves it to the database.
+
+        Args:
+            retrieval_method_page (str): The retrieval method page.
+            interacted_item_id (str): The ID of the interacted item.
+            is_positive_feedback (bool): Indicates whether the feedback is positive or negative.
+
+        Returns:
+            None
+        """
+        user_reference = self.username
+        if retrieval_method_page == "Search":
             if self.discovery_context != []:
                 print('Retrieval Method was Discovery')
                 query = json.dumps({
-                    "target": rx.state.serialize_mutable_proxy(self.search_query),
+                    # "target": rx.state.serialize_mutable_proxy(self.search_query),
+                    "target": self.search_query,
                     "context": rx.state.serialize_mutable_proxy(self.discovery_context),
                 })
                 print(query)
-
+                retrieval_method = "discovery"
             else:
                 print('Retrieval Method was Search')
-                query = rx.state.serialize_mutable_proxy(self.search_query)
+                # query = rx.state.serialize_mutable_proxy(self.search_query)
+                query = self.search_query
                 print(query)
+                retrieval_method = "search"
         else:
             print('Retrieval Method was Recommend')
             query = {}
@@ -426,92 +614,35 @@ class State(rx.State):
             if self.recommend_negative_samples != []:
                 query['negative'] = rx.state.serialize_mutable_proxy(self.recommend_negative_samples)
             query["strategy"] = "BEST_SCORE" if self.use_best_score_strategy else "AVERAGE_SCORE"
-            print(query)
-            print()
-            # query['strategy'] = "BEST_SCORE" if self.use_best_score_strategy else "AVERAGE_SCORE"
             query = json.dumps(query)
+            retrieval_method = "recommend"
             print(query)
+        
+        user_feedback = UserFeedback(
+            retrieval_method=retrieval_method,
+            interacted_item_id=interacted_item_id,
+            is_positive_feedback=is_positive_feedback,
+            query=query,
+            user_reference=user_reference,
+        )
+        print(user_feedback)
+        await self.save_user_feedback_to_db(user_feedback)
 
     def app_page_selection(self, page):
+        """
+        Selects the active page of the app.
+
+        Args:
+            page (str): The name of the page to be selected.
+
+        Returns:
+            None
+        """
         self.active_page = page
         print("Page Selected:", self.active_page)
 
 # -------------------------------------------------- App Pages -------------------------------------------------- #
 
-
-def index() -> rx.Component:
-    return rx.center(
-        rx.theme_panel(),
-        rx.vstack(
-            rx.heading("Welcome to Reflex!", size="9"),
-            rx.text("Get started by editing ", rx.code(filename)),
-            rx.button(
-                "Check out our docs!",
-                on_click=lambda: rx.redirect(docs_url),
-                size="4",
-            ),
-            align="center",
-            spacing="7",
-            font_size="2em",
-        ),
-        height="100vh",
-    )
-
-# def search() -> rx.Component:
-#     return rx.center(
-#         rx.theme_panel(),
-#         rx.vstack(
-#             rx.heading("Search for Similar Items", size="9"),
-#             rx.button(
-#                 "Search",
-#                 on_click=lambda: State.search(),
-#                 is_loading=State.loading_search_response,
-#                 size="4",
-#             ),
-#             rx.text("Search Results:"),
-#             # rx.text(State.search_results['result']),
-#             rx.grid(
-#                 rx.foreach(
-#                     rx.Var.range(16),
-#                     lambda i: rx.card(f"Card {i + 1}", height="10vh"),
-#                 ),
-#                 columns="2",
-#                 spacing="4",
-#                 width="100%",
-#             ),
-#         ),
-#         padding_top="6em",
-#         # text_align="top",
-#         # position="relative",
-#         height="100vh",
-#     )
-
-# def my_card(text, is_positive = True) -> rx.Component:
-#     if is_positive:
-#         # bg_color = '#acfcb5'
-#         bg_color = '#c5facc'
-#     else:
-#         # bg_color = '#f5a4a4'
-#         bg_color = '#fac5c5'
-#     return rx.card(
-#             rx.flex(
-#                 rx.box(
-#                     # rx.heading("Quick Start"),
-#                     rx.link(
-#                         rx.icon(tag="x", on_click=State.remove_from_dummy_buttons(text)),
-#                     ),
-#                     rx.text(
-#                         # button_name
-#                         'Some text' * 3
-#                     ),
-                    
-#                 ),
-#                 spacing="2",
-#                 direction="row",
-#             ),
-#         as_child=True,
-#         bg=bg_color,
-#         )
 
 # def better_card(title, initials: str, genre: str, is_positive = True) -> rx.Component:
 def sample_card(text, is_positive = True) -> rx.Component:
@@ -785,7 +916,8 @@ def recommendation_sample_input_component() -> rx.Component:
     )
 
 
-def item_card(retrieved_result, retrieval_method) -> rx.Component:
+def item_card(retrieved_result, retrieval_method_page) -> rx.Component:
+# def item_card(retrieved_result) -> rx.Component:
     return rx.card(
         rx.flex(
             rx.image(
@@ -814,8 +946,23 @@ def item_card(retrieved_result, retrieval_method) -> rx.Component:
             ),
             rx.divider(size="4"),
             rx.stack(
-                rx.button(rx.icon(tag="thumbs-up"), on_click=State.save_user_feedback_to_db(retrieval_method), width="50%", color_scheme="green",),
-                rx.button(rx.icon(tag="thumbs-down"), on_click=State.save_user_feedback_to_db(retrieval_method), width="50%", color_scheme="red",),
+                rx.button(
+                    rx.icon(tag="thumbs-up"), 
+                    # on_click=State.receive_user_feedback(
+                    #     retrieval_method_page=retrieval_method_page, 
+                    #     interacted_item_id=retrieved_result['id'], 
+                    #     is_positive_feedback=True
+                    # ), 
+                    on_click=State.receive_user_feedback(retrieval_method_page, retrieved_result['id'], True), 
+                    width="50%", 
+                    color_scheme="green",
+                ),
+                rx.button(
+                    rx.icon(tag="thumbs-down"), 
+                    on_click=State.receive_user_feedback(retrieval_method_page, retrieved_result['id'], False), 
+                    width="50%", 
+                    color_scheme="red",
+                ),
                 direction="row",
                 spacing="2",
                 width="100%",
@@ -834,7 +981,9 @@ def discovery_and_search_results() -> rx.Component:
         rx.grid(
             rx.foreach(
                 State.search_results,
-                lambda result: item_card(result, retrieval_method="Search"),
+                # lambda result: item_card(retrieved_result=result, retrieval_method_page="Search"),
+                # lambda result: item_card(retrieved_result=result),
+                lambda result: item_card(result, "Search"),
                 spacing="2",
                 columns="4",
             ),
@@ -851,7 +1000,9 @@ def recommend_retrieval_results() -> rx.Component:
         rx.grid(
             rx.foreach(
                 State.recommend_results,
-                lambda result: item_card(result, retrieval_method="Recommend"),
+                # lambda result: item_card(retrieved_result=result, retrieval_method_page="Recommend"),
+                # lambda result: item_card(retrieved_result=result),
+                lambda result: item_card(result, "Recommend"),
                 spacing="2",
                 columns="4",
             ),
@@ -859,65 +1010,6 @@ def recommend_retrieval_results() -> rx.Component:
             columns="4",
         ),
     )
-
-def layout_test() -> rx.Component:
-    # return rx.center(
-    #     rx.vstack(
-    #         rx.text("This is a test of the layout."),
-    #         rx.text("An extremely long line of text to test the layout. " * 10),
-    #         rx.grid(
-    #             rx.foreach(
-    #                 rx.Var.range(16),
-    #                 lambda i: rx.card(f"Card {i + 1}", height="10vh"),
-    #             ),
-    #             columns="4",
-    #             spacing="4",
-    #             width="100%",
-    #         ),
-    #         padding_top="6em",
-    #         position="relative",
-    #     )
-    # )
-    # return rx.center(
-    #     rx.text("Hello World!"),
-    #     border_radius="15px",
-    #     border_width="thick",
-    #     width="80%",
-    # )
-    return rx.flex(
-        rx.heading("Layout Test", size="9"),
-        target_input_component(),
-        recommendation_sample_input_component(),
-        # rx.grid(
-        #     rx.foreach(
-        #         State.dummy_buttons_one,
-        #         # lambda button_name: my_card(button_name, is_positive=True),
-        #         lambda button_name: sample_card(button_name, is_positive=True),
-        #         spacing="2",
-        #     ),
-        #     rx.foreach(
-        #         State.dummy_buttons_two,
-        #         # lambda button_name: my_card(button_name, is_positive=False),
-        #         lambda button_name: sample_card(button_name, is_positive=False),
-        #         spacing="2",
-        #     ),
-        #     spacing="2",
-        #     columns="6",
-        # ),
-        # rx.grid(
-        #     discovery_card("Positive Text", "Negative Text"),
-        #     discovery_card("Positive Other Text", "Negative Other Text"),
-        #     spacing="2",
-        #     columns="6",
-        # ),
-        positive_n_negative_sample_cards(),
-        discovery_cards(),
-        # discovery_and_search_results(),
-        recommend_retrieval_results(),
-        direction="column",
-        spacing="2",
-    )
-
 
 def navbar():
     return rx.hstack(
@@ -931,12 +1023,28 @@ def navbar():
             rx.menu.trigger(
                 rx.button("Menu"),
             ),
-            rx.menu.content(
-                rx.menu.item("Home", on_click=State.app_page_selection("Home")),
-                rx.menu.separator(),
-                rx.menu.item("Search & Discover", on_click=State.app_page_selection("Search & Discover")),
-                rx.menu.item("Recommend", on_click=State.app_page_selection("Recommend")),
-                width="10rem",
+            rx.cond(
+                State.logged_in,
+                rx.menu.content(
+                    rx.chakra.center(
+                        rx.chakra.vstack(
+                            rx.chakra.avatar(name=State.username, size="md"),
+                            rx.chakra.text(State.username),
+                        ),
+                    ),
+                    rx.menu.separator(),
+                    rx.menu.item("Home", on_click=State.app_page_selection("Home")),
+                    rx.menu.item("Search & Discover", on_click=State.app_page_selection("Search & Discover")),
+                    rx.menu.item("Recommend", on_click=State.app_page_selection("Recommend")),
+                    rx.menu.item("Feedbacks", on_click=State.app_page_selection("Feedbacks")),
+                    rx.menu.item("Logout", on_click=State.logout),
+                    width="10rem",
+                ),
+                rx.menu.content(
+                    rx.menu.item("Login", on_click=rx.redirect("/")),
+                    rx.menu.item("Sign Up", on_click=rx.redirect("/signup")),
+                    width="10rem",
+                ),
             ),
         ),
         position="fixed",
@@ -951,19 +1059,13 @@ def navbar():
 
 def home_content():
     return rx.flex(
+        rx.image(src="/StilSucher.png", width="30%"),
         rx.heading("Stilsucher", size="9"),
         rx.text("Stilsucher is a fashion search engine that uses the Fashion-CLIP to do Text2Image search and retrieval."),
         rx.text("You can use it to search for similar items, discover items by adding more context, and get recommendations based on positive and negative text."),
-        # rx.flex(
-        #     # rx.heading("Layout Test", size="9"),
-        #     target_input_component(),
-        #     discovery_cards(),
-        #     discovery_and_search_results(),
-        #     direction="column",
-        #     spacing="2",
-        # ),
         direction="column",
         spacing="3",
+        align="center",
     )
 
 def home_container():
@@ -1027,8 +1129,117 @@ def recommend_retrieval_container():
         max_width="70em",
     )
 
+def feedbacks_content():
+    return rx.flex(
+        rx.heading("Feedbacks", size="8"),
+        rx.divider(),
+        rx.data_table(
+            data=State.feedbacks,
+            columns=State.data_columns,
+            pagination=True,
+            sort=True,
+        ),
+        direction="column",
+        spacing="6",
+    )
 
-def spapp():
+def feedbacks_container():
+    return rx.container(
+        feedbacks_content(),
+        padding_top="6em",
+        max_width="70em",
+    )
+
+
+def login():
+    """
+    Renders a login form with username and password inputs, a login button, and a sign-up link.
+
+    Returns:
+        A Chakra UI component representing the login form.
+    """
+    return rx.chakra.center(
+        rx.chakra.vstack(
+            rx.chakra.input(on_blur=State.set_username, placeholder="Username", width="100%"),
+            rx.chakra.input(
+                type_="password",
+                on_blur=State.set_password,
+                placeholder="Password",
+                width="100%",
+            ),
+            rx.chakra.button("Login", on_click=State.login, width="100%"),
+            rx.chakra.link(rx.chakra.button("Sign Up", width="100%"), href="/signup", width="100%"),
+        ),
+        shadow="lg",
+        padding="1em",
+        border_radius="lg",
+        background="white",
+    )
+
+def signup():
+    """
+    Function to display the GPT Sign Up form.
+
+    Returns:
+        rx.chakra.box: The GPT Sign Up form.
+    """
+    return rx.chakra.box(
+        rx.chakra.vstack(
+            navbar(),
+            rx.chakra.center(
+                rx.chakra.vstack(
+                    rx.chakra.heading("GPT Sign Up", font_size="1.5em"),
+                    rx.chakra.input(
+                        on_blur=State.set_username, placeholder="Username", width="100%"
+                    ),
+                    rx.chakra.input(
+                        type_="password",
+                        on_blur=State.set_password,
+                        placeholder="Password",
+                        width="100%",
+                    ),
+                    rx.chakra.input(
+                        type_="password",
+                        on_blur=State.set_password,
+                        placeholder="Confirm Password",
+                        width="100%",
+                    ),
+                    rx.chakra.button("Sign Up", on_click=State.signup, width="100%"),
+                ),
+                shadow="lg",
+                padding="1em",
+                border_radius="lg",
+                background="white",
+            )
+        ),
+        padding_top="10em",
+        text_align="top",
+        position="relative",
+        width="100%",
+        height="100vh",
+        background="radial-gradient(circle at 22% 11%,rgba(62, 180, 137,.20),hsla(0,0%,100%,0) 19%),radial-gradient(circle at 82% 25%,rgba(33,150,243,.18),hsla(0,0%,100%,0) 35%),radial-gradient(circle at 25% 61%,rgba(250, 128, 114, .28),hsla(0,0%,100%,0) 55%)",
+    )
+
+def index():
+    """
+    This function returns a Chakra UI box with a vertical stack of components.
+    The components include a navbar and a login form.
+    """
+    return rx.chakra.box(
+        rx.chakra.vstack(
+            navbar(),
+            login(),
+        ),
+        padding_top="10em",
+        text_align="top",
+        position="relative",
+        width="100%",
+        height="100vh",
+        background="radial-gradient(circle at 22% 11%,rgba(62, 180, 137,.20),hsla(0,0%,100%,0) 19%),radial-gradient(circle at 82% 25%,rgba(33,150,243,.18),hsla(0,0%,100%,0) 35%),radial-gradient(circle at 25% 61%,rgba(250, 128, 114, .28),hsla(0,0%,100%,0) 55%)",
+    )
+
+
+def stilsucher_home():
     return rx.hstack(
         navbar(),
         rx.container(
@@ -1037,6 +1248,7 @@ def spapp():
                 ("Home", home_container()),
                 ("Search & Discover", search_and_discover_container()),
                 ("Recommend", recommend_retrieval_container()),
+                ("Feedbacks", feedbacks_container()),
             ),
         ),
     )
@@ -1045,10 +1257,9 @@ def spapp():
 
 app = rx.App()
 app.add_page(index)
-# app.add_page(search)
-app.add_page(layout_test, route="/layout-test")
-app.add_page(navbar, route="/navbar")
-app.add_page(spapp, route="/spapp")
+app.add_page(stilsucher_home, route="/home")
+app.add_page(signup)
+# app.add_page(home)
 
 # --------------------------------------------- Endpoints ------------------------------------------------ #
 
@@ -1068,6 +1279,15 @@ class DiscoverRequest(BaseModel):
 # FastAPI endpoints
 # @app.post("/search/")
 async def search_endpoint(request: SearchRequest):
+    """
+    Search endpoint that takes a SearchRequest object as input and returns the search results.
+
+    Parameters:
+        request (SearchRequest): The search request object containing the text to search.
+
+    Returns:
+        results (list): The search results.
+    """
     # query_vector = encode_text(request.text)
     query_vector = fclip.encode_text([request.text], batch_size=1)[0].tolist()
     results = await search_vectors(query_vector)
@@ -1075,8 +1295,15 @@ async def search_endpoint(request: SearchRequest):
 
 # @app.post("/recommend/")
 async def recommend_endpoint(request: RecommendRequest):
-    # positive_vectors = [encode_text(text) for text in request.positive_samples]
-    # negative_vectors = [encode_text(text) for text in request.negative_samples] if request.negative_samples else []
+    """
+    Recommends items based on positive and negative samples.
+
+    Args:
+        request (RecommendRequest): The request object containing positive and negative samples.
+
+    Returns:
+        results: The recommended items.
+    """
     positive_vectors = fclip.encode_text(request.positive_samples, batch_size=32)
     positive_vectors = [positive_vector.tolist() for positive_vector in positive_vectors]
     negative_vectors = fclip.encode_text(request.negative_samples, batch_size=32) if request.negative_samples else []
@@ -1086,6 +1313,15 @@ async def recommend_endpoint(request: RecommendRequest):
 
 # @app.post("/discover/")
 async def discover_endpoint(request: DiscoverRequest):
+    """
+    Discover endpoint that takes a DiscoverRequest object as input and returns the results.
+
+    Args:
+        request (DiscoverRequest): The DiscoverRequest object containing the target and context examples.
+
+    Returns:
+        results: The results of the discovery process.
+    """
     # target_vector = encode_text(request.target)
     target_vector = fclip.encode_text([request.target], batch_size=1)[0].tolist()
     context = [
@@ -1099,6 +1335,6 @@ async def discover_endpoint(request: DiscoverRequest):
     results = await discover_vectors(target_vector, context)
     return results
 
-app.api.add_api_route("/search/", search_endpoint, methods=["POST"], description="Search for similar items")
+app.api.add_api_route("/search/", search_endpoint, methods=["POST"], description="Search for similar items based on text input")
 app.api.add_api_route("/recommend/", recommend_endpoint, methods=["POST"], description="Search providing positive and negative samples")
-app.api.add_api_route("/discover/", discover_endpoint, methods=["POST"], description="Search and Discover items in based on context")
+app.api.add_api_route("/discover/", discover_endpoint, methods=["POST"], description="Search and Discover items in based on a target query and some context with positive and negative pairs")
